@@ -10,37 +10,45 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 const YTDLP = path.join(__dirname, 'yt-dlp');
 
-// Auto-download yt-dlp binary if not present
-function ensureYtDlp() {
+function run(cmd) {
   return new Promise((resolve, reject) => {
-    if (fs.existsSync(YTDLP)) {
-      fs.chmodSync(YTDLP, '755');
-      console.log('yt-dlp ready');
-      return resolve();
-    }
-    console.log('Downloading yt-dlp...');
-    const file = fs.createWriteStream(YTDLP);
-
-    function download(url) {
-      https.get(url, res => {
-        if (res.statusCode === 301 || res.statusCode === 302) {
-          return download(res.headers.location);
-        }
-        res.pipe(file);
-        file.on('finish', () => {
-          file.close();
-          fs.chmodSync(YTDLP, '755');
-          console.log('yt-dlp downloaded OK');
-          resolve();
-        });
-      }).on('error', err => {
-        try { fs.unlinkSync(YTDLP); } catch(_) {}
-        reject(err);
-      });
-    }
-
-    download('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp');
+    console.log('$', cmd);
+    exec(cmd, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) return reject(new Error(stderr || err.message));
+      resolve(stdout.trim());
+    });
   });
+}
+
+async function setup() {
+  // Install python3 and ffmpeg if missing
+  try {
+    await run('python3 --version');
+    console.log('python3 OK');
+  } catch {
+    console.log('Installing python3...');
+    await run('apt-get update -qq && apt-get install -y python3 ffmpeg');
+  }
+
+  // Download yt-dlp binary if missing
+  if (!fs.existsSync(YTDLP)) {
+    console.log('Downloading yt-dlp...');
+    await new Promise((resolve, reject) => {
+      const file = fs.createWriteStream(YTDLP);
+      function download(url) {
+        https.get(url, res => {
+          if (res.statusCode === 301 || res.statusCode === 302) return download(res.headers.location);
+          res.pipe(file);
+          file.on('finish', () => { file.close(); fs.chmodSync(YTDLP, '755'); resolve(); });
+        }).on('error', err => { try { fs.unlinkSync(YTDLP); } catch(_){} reject(err); });
+      }
+      download('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp');
+    });
+    console.log('yt-dlp downloaded OK');
+  } else {
+    fs.chmodSync(YTDLP, '755');
+    console.log('yt-dlp ready');
+  }
 }
 
 app.use(cors());
@@ -116,9 +124,7 @@ function streamFile(filePath, format, res) {
 
   const stream = fs.createReadStream(filePath);
   stream.pipe(res);
-  stream.on('close', () => {
-    try { fs.unlinkSync(filePath); } catch (_) {}
-  });
+  stream.on('close', () => { try { fs.unlinkSync(filePath); } catch (_) {} });
 }
 
 function formatDuration(secs) {
@@ -129,11 +135,9 @@ function formatDuration(secs) {
   return h ? `${h}:${String(m % 60).padStart(2, '0')}:${s}` : `${m}:${s}`;
 }
 
-ensureYtDlp().then(() => {
-  app.listen(PORT, () => {
-    console.log(`YTgrab running on http://localhost:${PORT}`);
-  });
+setup().then(() => {
+  app.listen(PORT, () => console.log(`YTgrab running on port ${PORT}`));
 }).catch(err => {
-  console.error('Failed to download yt-dlp:', err);
+  console.error('Setup failed:', err.message);
   process.exit(1);
 });
