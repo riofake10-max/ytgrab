@@ -1,47 +1,67 @@
-// server.js — YTgrab backend
-// Requirements: Node.js, yt-dlp installed on the system
-//
-// Setup:
-//   npm install express cors
-//   node server.js
-
 const express = require('express');
 const cors = require('cors');
-const { exec, execFile } = require('child_process');
+const { exec } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const https = require('https');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const YTDLP = path.join(__dirname, 'yt-dlp');
+
+// Auto-download yt-dlp binary if not present
+function ensureYtDlp() {
+  return new Promise((resolve, reject) => {
+    if (fs.existsSync(YTDLP)) {
+      fs.chmodSync(YTDLP, '755');
+      console.log('yt-dlp ready');
+      return resolve();
+    }
+    console.log('Downloading yt-dlp...');
+    const file = fs.createWriteStream(YTDLP);
+
+    function download(url) {
+      https.get(url, res => {
+        if (res.statusCode === 301 || res.statusCode === 302) {
+          return download(res.headers.location);
+        }
+        res.pipe(file);
+        file.on('finish', () => {
+          file.close();
+          fs.chmodSync(YTDLP, '755');
+          console.log('yt-dlp downloaded OK');
+          resolve();
+        });
+      }).on('error', err => {
+        try { fs.unlinkSync(YTDLP); } catch(_) {}
+        reject(err);
+      });
+    }
+
+    download('https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp');
+  });
+}
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(__dirname));
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
 function ytdlp(args) {
   return new Promise((resolve, reject) => {
-    exec(`yt-dlp ${args}`, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    exec(`"${YTDLP}" ${args}`, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
       if (err) return reject(new Error(stderr || err.message));
       resolve(stdout.trim());
     });
   });
 }
 
-// ── Routes ───────────────────────────────────────────────────────────────────
-
-// GET /info?url=...
-// Returns title, thumbnail, duration, uploader
 app.get('/info', async (req, res) => {
   const { url } = req.query;
   if (!url) return res.status(400).send('Missing url');
-
   try {
     const json = await ytdlp(`--dump-json --no-playlist "${url}"`);
     const info = JSON.parse(json);
-
     res.json({
       title: info.title,
       duration: formatDuration(info.duration),
@@ -53,9 +73,6 @@ app.get('/info', async (req, res) => {
   }
 });
 
-// POST /download
-// Body: { url, format: 'mp4'|'mp3', quality: '720'|'1080'|'480'|'360' }
-// Returns: binary file stream
 app.post('/download', async (req, res) => {
   const { url, format = 'mp4', quality = '720' } = req.body;
   if (!url) return res.status(400).send('Missing url');
@@ -64,28 +81,22 @@ app.post('/download', async (req, res) => {
   const tmpFile = path.join(tmpDir, `ytgrab_${Date.now()}`);
 
   let args;
-
   if (format === 'mp3') {
     args = `-x --audio-format mp3 --audio-quality 0 -o "${tmpFile}.%(ext)s" --no-playlist "${url}"`;
   } else {
-    // MP4: merge best video+audio at target quality
     args = `-f "bestvideo[height<=${quality}][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]" --merge-output-format mp4 -o "${tmpFile}.%(ext)s" --no-playlist "${url}"`;
   }
 
   try {
     await ytdlp(args);
 
-    // Find the output file
     const ext = format === 'mp3' ? 'mp3' : 'mp4';
-    const outFile = `${tmpFile}.${ext}`;
+    let outFile = `${tmpFile}.${ext}`;
 
     if (!fs.existsSync(outFile)) {
-      // Try finding any file with tmpFile prefix
       const files = fs.readdirSync(tmpDir).filter(f => f.startsWith(path.basename(tmpFile)));
       if (!files.length) throw new Error('Output file not found');
-      const found = path.join(tmpDir, files[0]);
-      streamFile(found, format, res);
-      return;
+      outFile = path.join(tmpDir, files[0]);
     }
 
     streamFile(outFile, format, res);
@@ -118,9 +129,11 @@ function formatDuration(secs) {
   return h ? `${h}:${String(m % 60).padStart(2, '0')}:${s}` : `${m}:${s}`;
 }
 
-// ── Start ─────────────────────────────────────────────────────────────────────
-
-app.listen(PORT, () => {
-  console.log(`YTgrab server running on http://localhost:${PORT}`);
-  console.log('Make sure yt-dlp is installed: https://github.com/yt-dlp/yt-dlp');
+ensureYtDlp().then(() => {
+  app.listen(PORT, () => {
+    console.log(`YTgrab running on http://localhost:${PORT}`);
+  });
+}).catch(err => {
+  console.error('Failed to download yt-dlp:', err);
+  process.exit(1);
 });
