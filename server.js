@@ -26,8 +26,20 @@ async function setup() {
     await run('python3 --version');
     console.log('python3 OK');
   } catch {
-    console.log('Installing python3...');
+    console.log('Installing python3 + ffmpeg...');
     await run('apt-get update -qq && apt-get install -y python3 ffmpeg');
+  }
+
+  // Install deno if missing (yt-dlp needs a JS runtime)
+  try {
+    await run('deno --version');
+    console.log('deno OK');
+  } catch {
+    console.log('Installing deno...');
+    await run('curl -fsSL https://deno.land/install.sh | sh');
+    // Add deno to PATH for subsequent calls
+    process.env.PATH = `${process.env.HOME}/.deno/bin:${process.env.PATH}`;
+    console.log('deno installed');
   }
 
   // Download yt-dlp binary if missing
@@ -56,8 +68,10 @@ app.use(express.json());
 app.use(express.static(__dirname));
 
 function ytdlp(args) {
+  const denoPath = `${process.env.HOME}/.deno/bin`;
+  const env = { ...process.env, PATH: `${denoPath}:${process.env.PATH}` };
   return new Promise((resolve, reject) => {
-    exec(`"${YTDLP}" ${args}`, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) => {
+    exec(`"${YTDLP}" --js-runtimes deno ${args}`, { maxBuffer: 10 * 1024 * 1024, env }, (err, stdout, stderr) => {
       if (err) return reject(new Error(stderr || err.message));
       resolve(stdout.trim());
     });
